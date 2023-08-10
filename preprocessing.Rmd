@@ -1,0 +1,337 @@
+---
+title: "Preprocessing"
+author: "Billy Parmenter"
+date: "2023-06-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require(pastecs)){install.packages("pastecs")}
+library("pastecs")
+
+if(!require(ggplot2)){install.packages("ggplot2")}
+library("ggplot2")
+
+if(!require(lattice)){install.packages("lattice")}
+library("lattice")
+
+if(!require(tinytex)){install.packages("tinytex")}
+library("tinytex")
+
+if(!require(corrplot)){install.packages("corrplot")}
+library(corrplot)
+
+if (!require(caret)) {install.packages("caret")}
+library(caret)
+
+library(gbm)
+
+library(randomForest)
+```
+
+
+# Data Exploration
+
+
+```{r}
+# Load data
+RentalData <- read.csv('Data/House_Rent_Dataset.csv')
+head(RentalData)
+```
+
+There seems to be no missing data
+```{r}
+summary(RentalData)
+```
+
+
+# Data Preprocessing
+These steps were taken from the slides in week 1
+
+
+## 1) Deduplicate your data
+```{r}
+numberOfDuplicate <- length(RentalData) - length(unique(RentalData))
+numberOfDuplicate
+```
+There are no duplicate rows
+
+## 2) Deal with missing data
+
+```{r}
+RentalData
+RentalData <- na.omit(RentalData)
+RentalData
+```
+
+## 3) Fix structural errors
+
+Floor as it is does not seem usable. Try spliting the floor feature into three other numeric features, Rental.Floor (the floor the rental unit is on), Building.Floors (How many floors are in the building), and Rental.Floor.Ratio (Rental.Floor/Building.Floors, how far up the unit is to the top of the building)
+
+Getting the number of floors in a building
+```{r}
+if(!require(stringr)){install.packages("stringr")}
+library(stringr)
+# Use regex to get the top floor number and convert character to numeric
+RentalData$Building.Floors <- str_extract(RentalData$Floor, "(?<=out of )(\\d)")
+RentalData$Building.Floors <- as.numeric(RentalData$Building.Floors)
+
+# Add one because they use ground floor as 1st floor and 1st floor as 2nd floor...
+RentalData$Building.Floors <- RentalData$Building.Floors + 1
+```
+
+Getting the floor of the rental unit
+```{r}
+# Get all numeric values for the rental units floor
+RentalData$Rental.Floor <- str_extract(RentalData$Floor, "^(\\d)")
+RentalData$Rental.Floor <- as.numeric(RentalData$Rental.Floor)
+
+# Add one because they use ground floor as 1st floor and 1st floor as 2nd floor...
+RentalData$Rental.Floor <- RentalData$Rental.Floor + 1
+
+# Get all values of ground floor units and set it as floor 1
+RentalData$Rental.Floor[str_detect(RentalData$Floor, "^Ground")] <- 1 
+```
+
+There are some units that are listed as upper/lower basements I am setting these to 0
+```{r}
+# Set any basement units to floor 0
+RentalData$Rental.Floor[str_detect(RentalData$Floor, "^Lower|Upper")] <- 0 
+```
+
+Getting the ratio of unit floor to building floors
+```{r}
+RentalData$Rental.Floor.Ratio <- RentalData$Rental.Floor / RentalData$Building.Floors * 100
+```
+
+By splitting the data we have created 4 NA values
+```{r}
+summary(RentalData)
+```
+
+
+## 4) Remove irrelevant data
+
+Look at correlation and see if there are any features that are not relevant to the problem
+```{r}
+res <- cor(noNaRentalData[,c(2,3,4,11,13,14,15)],method="pearson")
+
+corrplot(res, type = "upper", diag = FALSE,
+         tl.col = "black", tl.srt = 45)
+```
+There seems to be little correlation between floor the rental unit is on and rent as well as ratio and rent but no correlation between number of floors in the building and rent.
+```{r}
+summary(RentalData$Rental.Floor)
+summary(RentalData$Building.Floors)
+# Find rows with missing data in RentalData
+missing_rows <- which(rowSums(is.na(RentalData)) > 0)
+
+# Display the rows with missing data
+RentalData[missing_rows, ]
+```
+
+## 5) Filter out features of Building.Floors
+```{r}
+col_to_drop <- c('Building.Floors', 'floor', 'Posted.On', 'Area.Type', 'Area.Locality', 'Tenant.Preferred', 'Point.of.Contact')
+
+RentalData <- RentalData[, !(names(RentalData) %in% col_to_drop)]
+RentalData
+res <- cor(RentalData[,c(1,2,3,7,8,9)],method="pearson")
+
+corrplot(res)
+```
+
+
+## 6) Filter out data outliers
+```{r}
+
+create_density_plots <- function(dataframe) {
+  numeric_columns <- sapply(dataframe, is.numeric)
+  
+  for (col in colnames(dataframe)[numeric_columns]) {
+    p <- ggplot(dataframe, aes(x = dataframe[[col]])) +
+      geom_density(fill = "blue", alpha = 0.5) +
+      labs(title = paste("Density Plot of", col))
+    
+    print(p)
+  }
+}
+
+create_box_plots <- function(dataframe) {
+  numeric_columns <- sapply(RentalData, is.numeric) # Identify numeric columns
+
+  for (col in colnames(RentalData)[numeric_columns]) {
+    boxplot(RentalData[[col]], horizontal=TRUE, main=col)
+  }
+}
+
+create_density_plots(RentalData)
+create_box_plots(RentalData)
+
+
+```
+Deal with Size outliers
+```{r}
+
+remove_outliers <- function(dataframe) {
+  numeric_columns <- sapply(dataframe, is.numeric)
+  
+  for (col in colnames(dataframe)[numeric_columns]) {
+    if (col != 'Rental.Floor'){
+      outliers <- boxplot.stats(dataframe[[col]])$out # Get outliers
+      dataframe[[col]][dataframe[[col]] %in% outliers] <- NA
+    }
+  }
+  cleaned_dataframe <- na.omit(dataframe)
+  return(cleaned_dataframe)
+}
+
+
+RentalData_cleaned <- remove_outliers(RentalData)
+
+create_density_plots(RentalData_cleaned)
+create_box_plots(RentalData_cleaned)
+
+```
+The number of removed rows
+```{r}
+dim(RentalData)[1] - dim(RentalData_cleaned)[1]
+```
+
+## 7) Data Visulization
+```{r}
+# pie chart for city
+city_freq <- table(RentalData_encoded$City)
+city_perc <- round(100*city_freq / sum(city_freq), 1)
+labels <- paste(names(city_freq), "(", city_perc, "%)")
+pie(city_freq, labels=labels, main='City')
+
+# plot rent
+barplot(table(RentalData_encoded$Rent), cex.names=.75, main='Rent')
+
+
+```
+
+```{r}
+
+label_encode_all_columns <- function(dataframe) {
+  for (col in colnames(dataframe)) {
+    if (is.factor(dataframe[[col]]) || is.character(dataframe[[col]])) {
+      dataframe[[col]] <- as.numeric(factor(dataframe[[col]]))
+    }
+  }
+  return(dataframe)
+}
+
+RentalData_encoded <- label_encode_all_columns(RentalData_cleaned)
+
+
+```
+
+```{r}
+pairs(RentalData_encoded)
+```
+
+```{r}
+my_cols <- c("#00AFBB", "#E7B800", "#FC4E07")  
+pairs(RentalData_encoded, pch = 19,  cex = 0.5)
+
+# Correlation panel
+panel.cor <- function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+# Customize upper panel
+upper.panel<-function(x, y){
+  points(x,y, pch = 19)
+}
+# Create the plots
+pairs(RentalData_encoded, 
+      lower.panel = panel.cor,
+      upper.panel = upper.panel)
+```
+
+```{r}
+library(psych)
+pairs.panels(RentalData_encoded, 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+```
+The city that the unit is in plays a big role, maybe try one hot encoding. Also Furnishing is a factor
+```{r}
+aggregate(RentalData$Rent, list(RentalData$City), FUN=mean)
+aggregate(RentalData$Rent, list(RentalData$Furnishing.Status), FUN=mean)
+```
+
+```{r}
+train_model <- function(data, method, target_col) {
+  set.seed(387)
+  train_index <- createDataPartition(data[[target_col]], p = 0.8, list = FALSE)
+  train_data <- data[train_index, ]
+
+  # Train the model
+  if (method == "lm") {
+      trained_model <- train(
+      formula(paste(target_col, "~ .")),
+      data = train_data,
+      method = method,
+      trControl = trainControl(method = "cv"),
+      preProcess = c("center", "scale")
+    )
+  } else {
+    trained_model <- train(
+      formula(paste(target_col, "~ .")),
+      data = train_data,
+      method = method,
+      trControl = trainControl(method = "cv"),
+      preProcess = c("center", "scale"),
+      verbose = FALSE
+    )
+  }
+
+  return(trained_model)
+}
+
+# Train a Linear Regression model
+lm_model <- train_model(RentalData_encoded, method = "lm", target_col = "Rent")
+
+# Train a Random Forest model
+rf_model <- train_model(RentalData_encoded, method = "rf", target_col = "Rent")
+
+# Train a Gradient Boosting model
+gbm_model <- train_model(RentalData_encoded, method = "gbm", target_col = "Rent")
+```
+
+
+```{r}
+
+# Function to evaluate a trained model
+evaluate_model <- function(trained_model, test_data, target_col) {
+  predictions <- predict(trained_model, newdata = test_data)
+  rmse <- sqrt(mean((test_data[[target_col]] - predictions)^2))
+  return(rmse)
+}
+
+# Evaluate models using the evaluate_model function
+lm_rmse <- evaluate_model(lm_model, RentalData_encoded, target_col = "Rent")
+rf_rmse <- evaluate_model(rf_model, RentalData_encoded, target_col = "Rent")
+gbm_rmse <- evaluate_model(gbm_model, RentalData_encoded, target_col = "Rent")
+
+# Display RMSE values
+cat("Linear Regression RMSE:", lm_rmse, "\n")
+cat("Random Forest RMSE:", rf_rmse, "\n")
+cat("Gradient Boosting RMSE:", gbm_rmse, "\n")
+
+
+
+```
+
+
