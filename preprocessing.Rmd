@@ -25,8 +25,10 @@ library(corrplot)
 if (!require(caret)) {install.packages("caret")}
 library(caret)
 
+if (!require(gbm)) {install.packages("gbm")}
 library(gbm)
 
+if (!require(randomForest)) {install.packages("randomForest")}
 library(randomForest)
 ```
 
@@ -36,7 +38,7 @@ library(randomForest)
 
 ```{r}
 # Load data
-RentalData <- read.csv('Data/House_Rent_Dataset.csv')
+RentalData <- read.csv('../Data/House_Rent_Dataset.csv')
 head(RentalData)
 ```
 
@@ -115,6 +117,7 @@ summary(RentalData)
 
 Look at correlation and see if there are any features that are not relevant to the problem
 ```{r}
+noNaRentalData <- na.omit(RentalData)
 res <- cor(noNaRentalData[,c(2,3,4,11,13,14,15)],method="pearson")
 
 corrplot(res, type = "upper", diag = FALSE,
@@ -133,6 +136,10 @@ RentalData[missing_rows, ]
 
 ## 5) Filter out features of Building.Floors
 ```{r}
+RentalData
+RentalData <- na.omit(RentalData)
+RentalData
+
 col_to_drop <- c('Building.Floors', 'floor', 'Posted.On', 'Area.Type', 'Area.Locality', 'Tenant.Preferred', 'Point.of.Contact')
 
 RentalData <- RentalData[, !(names(RentalData) %in% col_to_drop)]
@@ -198,6 +205,21 @@ The number of removed rows
 ```{r}
 dim(RentalData)[1] - dim(RentalData_cleaned)[1]
 ```
+```{r}
+
+label_encode_all_columns <- function(dataframe) {
+  for (col in colnames(dataframe)) {
+    if (is.factor(dataframe[[col]]) || is.character(dataframe[[col]])) {
+      dataframe[[col]] <- as.numeric(factor(dataframe[[col]]))
+    }
+  }
+  return(dataframe)
+}
+
+RentalData_encoded <- label_encode_all_columns(RentalData_cleaned)
+RentalData_encoded
+
+```
 
 ## 7) Data Visulization
 ```{r}
@@ -213,21 +235,7 @@ barplot(table(RentalData_encoded$Rent), cex.names=.75, main='Rent')
 
 ```
 
-```{r}
 
-label_encode_all_columns <- function(dataframe) {
-  for (col in colnames(dataframe)) {
-    if (is.factor(dataframe[[col]]) || is.character(dataframe[[col]])) {
-      dataframe[[col]] <- as.numeric(factor(dataframe[[col]]))
-    }
-  }
-  return(dataframe)
-}
-
-RentalData_encoded <- label_encode_all_columns(RentalData_cleaned)
-
-
-```
 
 ```{r}
 pairs(RentalData_encoded)
@@ -273,35 +281,67 @@ aggregate(RentalData$Rent, list(RentalData$Furnishing.Status), FUN=mean)
 
 ```{r}
 train_model <- function(data, method, target_col) {
-  set.seed(387)
   train_index <- createDataPartition(data[[target_col]], p = 0.8, list = FALSE)
   train_data <- data[train_index, ]
-
-  # Train the model
-  if (method == "lm") {
-      trained_model <- train(
-      formula(paste(target_col, "~ .")),
-      data = train_data,
-      method = method,
-      trControl = trainControl(method = "cv"),
-      preProcess = c("center", "scale")
-    )
-  } else {
-    trained_model <- train(
-      formula(paste(target_col, "~ .")),
-      data = train_data,
-      method = method,
-      trControl = trainControl(method = "cv"),
-      preProcess = c("center", "scale"),
-      verbose = FALSE
-    )
-  }
+  
+  trained_model <- train(
+    formula(paste(target_col, "~ .")),
+    data = train_data,
+    method = method,
+    trControl = trainControl(method = "cv"),
+    preProcess = c("center", "scale"),
+    verbose = FALSE
+  )
 
   return(trained_model)
 }
 
-# Train a Linear Regression model
-lm_model <- train_model(RentalData_encoded, method = "lm", target_col = "Rent")
+train_model_stepwise <- function(data, target_col) {
+  train_index <- createDataPartition(data[[target_col]], p = 0.8, list = FALSE)
+  train_data <- data[train_index, ]
+  
+  formula_initial <- paste(target_col, "~ .")
+  
+  # Train a full linear regression model
+  full_lm_model <- train(
+    as.formula(formula_initial),
+    data = train_data,
+    method = "lm",
+    trControl = trainControl(method = "cv"),
+    preProcess = c("center", "scale")
+  )
+  
+  print("Full Model:")
+  print(summary(full_lm_model$finalModel))
+  
+  # Perform backward selection
+  backward_formula <- step(
+    lm(as.formula(formula_initial), data = train_data),
+    direction = "backward"
+  )
+  
+  print("Backward Selection Model:")
+  print(summary(lm(backward_formula, data = train_data)))
+  
+  # Train a linear regression model with the selected features from backward selection
+  best_lm_model <- train(
+    as.formula(backward_formula),
+    data = train_data,
+    method = "lm",
+    trControl = trainControl(method = "cv"),
+    preProcess = c("center", "scale")
+  )
+  
+  print("Best Model:")
+  print(summary(best_lm_model$finalModel))
+  
+  return(best_lm_model)
+}
+
+# Train a Linear Regression model using stepwise selection
+lm_model <- train_model_stepwise(RentalData_encoded, target_col = "Rent")
+
+
 
 # Train a Random Forest model
 rf_model <- train_model(RentalData_encoded, method = "rf", target_col = "Rent")
@@ -313,25 +353,96 @@ gbm_model <- train_model(RentalData_encoded, method = "gbm", target_col = "Rent"
 
 ```{r}
 
+
 # Function to evaluate a trained model
-evaluate_model <- function(trained_model, test_data, target_col) {
+evaluate_model <- function(trained_model, test_data, target_col, model_name) {
   predictions <- predict(trained_model, newdata = test_data)
-  rmse <- sqrt(mean((test_data[[target_col]] - predictions)^2))
-  return(rmse)
+  residuals <- test_data[[target_col]] - predictions
+  rmse <- sqrt(mean(residuals^2))
+  
+  # Calculate R-squared
+  ss_total <- sum((test_data[[target_col]] - mean(test_data[[target_col]]))^2)
+  ss_residual <- sum(residuals^2)
+  r_squared <- 1 - (ss_residual / ss_total)
+  
+  # Calculate adjusted R-squared
+  n <- nrow(test_data)
+  p <- length(trained_model$finalModel$coefficients)
+  adjusted_r_squared <- 1 - ((1 - r_squared) * (n - 1)) / (n - p - 1)
+  
+  # Print metrics
+  cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+  cat("R-squared:", r_squared, "\n")
+  cat("Adjusted R-squared:", adjusted_r_squared, "\n")
+  
+  # Plot residuals vs fitted values
+  plot_residuals <- plot(residuals, 
+                          xlab = "Fitted Values", ylab = "Residuals",
+                          main = paste("Residuals vs Fitted Values ", model_name))
+  abline(h=0, col="red")
+  print(plot_residuals)
+  
+  # Plot residuals histogram
+  plot_histogram <- qplot(residuals, bins = 20, 
+                           xlab = "Residuals", ylab = "Frequency",
+                           main = paste("Histogram of Residuals ", model_name))
+  print(plot_histogram)
+  
+  # Plot normal QQ plot of residuals
+  plot_qq <- qqnorm(residuals, main = paste("Normal Q-Q Plot of Residuals ", model_name))
+  qqline(residuals)
+  print(plot_qq)
+  
+  return(list(rmse = rmse, r_squared = r_squared, adjusted_r_squared = adjusted_r_squared))
 }
 
-# Evaluate models using the evaluate_model function
-lm_rmse <- evaluate_model(lm_model, RentalData_encoded, target_col = "Rent")
-rf_rmse <- evaluate_model(rf_model, RentalData_encoded, target_col = "Rent")
-gbm_rmse <- evaluate_model(gbm_model, RentalData_encoded, target_col = "Rent")
+# Evaluate the three models
+evaluation_lm <- evaluate_model(lm_model_stepwise, RentalData_encoded, target_col = "Rent", "Linear")
+evaluation_rf <- evaluate_model(rf_model, RentalData_encoded, target_col = "Rent", "Random Forest")
+evaluation_gbm <- evaluate_model(gbm_model, RentalData_encoded, target_col = "Rent", "GBM")
 
-# Display RMSE values
-cat("Linear Regression RMSE:", lm_rmse, "\n")
-cat("Random Forest RMSE:", rf_rmse, "\n")
-cat("Gradient Boosting RMSE:", gbm_rmse, "\n")
+# Compare the metrics
+comparison <- data.frame(
+  Model = c("Linear Regression", "Random Forest", "Gradient Boosting"),
+  RMSE = c(evaluation_lm$rmse, evaluation_rf$rmse, evaluation_gbm$rmse),
+  R2 = c(evaluation_lm$r_squared, evaluation_rf$r_squared, evaluation_gbm$r_squared),
+  Adjusted_R2 = c(evaluation_lm$adjusted_r_squared, evaluation_rf$adjusted_r_squared, evaluation_gbm$adjusted_r_squared)
+)
+
+comparison
+
 
 
 
 ```
+The Random Forest model seems to have the best performance with lowest RMSE.
+The residual plot of random forest model seems pretty close to 0 which is good.
 
+
+## 8) Prediction
+```{r}
+# create prediction dataset manually
+prediction_data <- data.frame(
+  BHK = c(2, 2, 2, 2, 2, 2, 2),
+  Rent = c(10000, 20000, 17000, 10000, 7500, 7000, 10000),
+  Size = c(1100, 800, 1000, 800, 850, 600, 700),
+  Floor = c(213, 14, 14, 10, 10, 207, 216),
+  City = rep(5, 7), # Assuming 5 is the encoded value for Kolkata
+  `Furnishing.Status` = c(3, 2, 2, 3, 3, 3, 3),
+  Bathroom = c(2, 1, 1, 2, 2, 2, 2),
+  `Rental.Floor` = c(1, 2, 2, 1, 1, 1, 1),
+  `Rental.Floor.Ratio` = c(33.33333, 50.00000, 50.00000, 33.33333, 33.33333, 33.33333, 33.33333)
+)
+```
+
+```{r}
+lm_predictions <- predict(lm_model, newdata = prediction_data)
+rf_predictions <- predict(rf_model, newdata = prediction_data)
+gbm_predictions <- predict(gbm_model, newdata = prediction_data)
+
+# Display predictions for each model
+cat("Linear Regression Predictions:", lm_predictions, "\n")
+cat("Random Forest Predictions:", rf_predictions, "\n")
+cat("Gradient Boosting Predictions:", gbm_predictions, "\n")
+```
 
